@@ -561,7 +561,7 @@ int main(int argc, char **argv)
                "rounding intervals): samples moved %.3f steps RMS, %.3f at most; %.2f s\n",
                src.bps, mem.moved_rms, mem.moved_max, mem.seconds);
     else if (o.restore)
-        printf("  restore    skipped: a %s source has no rounding grid to back-calculate from\n",
+        printf("  restore    skipped: only 8 to 24-bit integer sources are back-calculated (this one: %s)\n",
                depth);
     if (wall > 0.0)
         printf("  bandwidth  the source's content ends at %.0f Hz (a %.1f dB wall)\n", wall, wall_drop);
