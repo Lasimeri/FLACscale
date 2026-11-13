@@ -1,0 +1,11 @@
+-xc
+-std=gnu2x
+-O3
+-mavx2
+-mfma
+-mbmi2
+-mtune=znver3
+-Wall
+-Wextra
+-Werror
+-I.

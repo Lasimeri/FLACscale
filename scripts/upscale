@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# upscale -- run one audio file through FLACscale, the project way.
+#
+#   scripts/upscale FILE [OUTDIR-NAME]
+#
+# 1. copies FILE into input/ read-only (skipped when it is already there) and
+#    checks its SHA-256 against the original
+# 2. runs out/flacscale into out/OUTDIR-NAME/ (default: the file's name without
+#    extension), logging the report to out/OUTDIR-NAME/run.log
+# 3. verifies every FLAC written with `flac -t`
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+[ $# -ge 1 ] || { echo "usage: scripts/upscale FILE [OUTDIR-NAME]" >&2; exit 2; }
+src="$1"
+[ -f "$src" ] || { echo "upscale: no such file: $src" >&2; exit 1; }
+name="$(basename "$src")"
+stem="${name%.*}"
+dir="$root/out/${2:-$stem}"
+dst="$root/input/$name"
+mkdir -p "$root/input"
+
+if [ "$(realpath "$src")" != "$(realpath -m "$dst")" ]; then
+    if [ ! -e "$dst" ]; then
+        cp "$src" "$dst"
+        chmod a-w "$dst"
+    fi
+    a="$(sha256sum < "$src" | cut -d' ' -f1)"
+    b="$(sha256sum < "$dst" | cut -d' ' -f1)"
+    [ "$a" = "$b" ] || { echo "upscale: input/$name differs from $src (sha256 $b vs $a)" >&2; exit 1; }
+    grep -qF "$b  $name" "$root/input/SHA256SUMS" 2>/dev/null || printf '%s  %s\n' "$b" "$name" >> "$root/input/SHA256SUMS"
+fi
+
+mkdir -p "$dir"
+"$root/out/flacscale" "$dst" -o "$dir/$stem.192k32.flac" | tee "$dir/run.log"
+for f in "$dir/$stem.192k32.flac" "$dir/$stem.flac"; do
+    [ -f "$f" ] || continue
+    if flac -t --silent "$f"; then
+        echo "  verified   flac -t ok: $f" | tee -a "$dir/run.log"
+    else
+        echo "  FAILED     flac -t: $f" | tee -a "$dir/run.log"
+        exit 1
+    fi
+done

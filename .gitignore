@@ -1,0 +1,7 @@
+# Local only, never published.
+# input/  your audio files (read-only copies made by scripts/upscale)
+# out/    built tools, converted files, logs
+# ref/    optional: unpacked libopus source, for reading the cited lines
+/input/
+/out/
+/ref/
