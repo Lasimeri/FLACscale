@@ -212,3 +212,51 @@ instance slows from 26.76 s alone to about 37 s with all 64 cores busy.
 Gates on that machine: `pcmcheck` PASS (conversion 10.0x, peak 7.0x over the
 plain forms); resampler chain 55.7 ms per 10 s stereo (179.6x), libsoxr VHQ
 34.0 ms (1.64x faster there).
+
+## 10. Dequantization against a known truth (`out/dequantcheck FILE`)
+
+Not part of the converter yet: a gated module (`fu_dequant`) for a separate
+restoration mode. See [ROADMAP.md](ROADMAP.md).
+
+Method: take audio finer than 16 bits, round it to 16 bits, run the
+dequantizer on the rounded copy, and score both against the original over the
+whole file. Truth: a 96 kHz / 32-bit master (207.084 s, stereo), resampled to
+44.1 kHz in 64-bit float with ffmpeg's soxr resampler (precision 33). `-a`
+attenuates the truth before rounding, which is what a quiet passage is: at
+-40 dBFS a 16-bit file has about 9 bits to work with.
+
+Default settings (Wiener filter, projection into the rounding intervals, two
+passes), plain rounding:
+
+| Level of the passage | SDR rounded dB | SDR dequantized dB | Gain dB |
+|---|---|---|---|
+| as mastered (RMS about -15 dBFS) | 85.25 | 85.68 | +0.42 |
+| 20 dB down | 65.29 | 66.11 | +0.82 |
+| 40 dB down | 45.30 | 46.66 | +1.36 |
+| 60 dB down | 25.34 | 28.16 | +2.82 |
+
+With TPDF dither before rounding (intervals 1.5 steps wide): +0.58 dB as
+mastered, +1.66 dB at 40 dB down. Time: 0.53 to 0.57 s for the 207 s file on
+16 threads.
+
+Passes: one gives +0.40 / +0.77 / +1.28 / +2.63 dB; two are the table above;
+a third adds at most 0.05 dB.
+
+**What this says.** The gain is real and small where the music is loud,
+because loud music covers the rounding noise in almost every time-frequency
+cell and nothing can be told apart there. It grows as the passage gets
+quieter. This is one master; it is not a claim about all music.
+
+**Two formulations were built first and rejected by this gate.** Both search
+the rounding intervals for the "most structured" signal:
+
+| Formulation | Result against the rounded signal |
+|---|---|
+| L1-sparse coefficients, consistent, Douglas-Rachford (the published method) | 5.4 to 5.9 dB worse, at 16 bits, at 16 bits 40 dB down, and at 8 bits |
+| The same with a spectrum-weighted quadratic penalty | 2.0 to 5.0 dB worse; +0.70 dB only at 60 dB down |
+
+Cause: a penalty that prefers "smaller" slides every sample to the edge of its
+interval nearest zero (the largest move was 0.500 steps in every run), and an
+error of half a step everywhere is worse than the rounding error it replaces.
+Those tests ran on dense, loud electronic music; the published evaluations use
+sparser material.

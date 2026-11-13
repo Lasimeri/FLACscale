@@ -151,6 +151,7 @@ All in `out/` after `make`.
 | `flacdiff A B` | null test between two files: offset, gain, residual |
 | `clipscan FILE [-t TOL]` | how many samples sit pinned at the extremes, and in what runs |
 | `declipcheck FILE` | scores the repair against a known truth (needs an unclipped file) |
+| `dequantcheck FILE` | scores the dequantizer against a known truth (needs a file finer than 16 bits) |
 | `rsbench`, `pcmcheck` | gates for the resampler and the PCM kernels |
 | `tonegen OUT.wav` | the synthetic test signal used by `make check` |
 

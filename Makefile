@@ -11,7 +11,7 @@ INLIBS  := -lFLAC -lmpg123 -lsndfile
 DECLIP  := src/fu_declip.c src/fu_lpc.c
 ENGINE  := src/fu_engine.c src/fu_resample.c src/fu_cliplevel.c src/fu_cutoff.c src/fu_extend.c $(DECLIP)
 
-TOOLS := flacscale flacspec flacdiff clipscan declipcheck rsbench pcmcheck tonegen
+TOOLS := flacscale flacspec flacdiff clipscan declipcheck dequantcheck rsbench pcmcheck tonegen
 BINS  := $(TOOLS:%=out/%)
 all: $(BINS)
 
@@ -33,6 +33,9 @@ out/clipscan: src/clipscan.c $(INPUT) $(HEADERS)
 
 out/declipcheck: src/declipcheck.c $(DECLIP) $(INPUT) $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ src/declipcheck.c $(DECLIP) $(INPUT) $(INLIBS) -lm
+
+out/dequantcheck: src/dequantcheck.c src/fu_dequant.c $(INPUT) $(HEADERS)
+	$(CC) $(CFLAGS) -fopenmp -o $@ src/dequantcheck.c src/fu_dequant.c $(INPUT) $(INLIBS) -lfftw3 -lm
 
 out/rsbench: src/rsbench.c src/fu_resample_ref.c src/fu_resample.c $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ src/rsbench.c src/fu_resample_ref.c src/fu_resample.c -lsoxr -lm
