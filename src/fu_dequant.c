@@ -176,10 +176,14 @@ int fu_dequant(double *x, size_t n, double step, const fu_dequant_cfg *cfg)
     for (int j = 0; j < N; j++)
         win[j] = (0.5 - 0.5 * cos(2.0 * M_PI * j / N)) / sqrt(1.5);
     /* Plans are made once, serially (the planner is not thread-safe); executing
-     * them on other arrays from several threads is. */
+     * them on other arrays from several threads is. FFTW_ESTIMATE on purpose: the
+     * timing-based planner (FFTW_MEASURE) picks a different algorithm under load,
+     * and algorithms round differently. Measured: five runs of one file gave three
+     * different outputs (1 LSB of 32 bits apart, -242 dB). The output must not
+     * depend on how busy the machine is. */
     const transform t = { .win = win, .unit = 1.0 / sqrt((double)N),
-                          .fwd = fftw_plan_dft_r2c_1d(N, probe_t, probe_f, FFTW_MEASURE),
-                          .inv = fftw_plan_dft_c2r_1d(N, probe_f, probe_t, FFTW_MEASURE) };
+                          .fwd = fftw_plan_dft_r2c_1d(N, probe_t, probe_f, FFTW_ESTIMATE),
+                          .inv = fftw_plan_dft_c2r_1d(N, probe_f, probe_t, FFTW_ESTIMATE) };
     const double half = cfg->half * step, noise = 0.25 * cfg->noise * step * step;
     int failed = 0;
 #pragma omp parallel num_threads(threads)

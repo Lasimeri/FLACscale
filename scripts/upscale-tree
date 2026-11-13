@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# upscale-tree -- convert every FLAC and MP3 under SRC into DST, keeping the folders.
+#
+#   scripts/upscale-tree SRC DST [-j JOBS] [-c CPULIST] [-s STAGE] [-r RESERVE_GIB] [-n]
+#                                [-- FLACSCALE-OPTIONS...]
+#
+# SRC/Artist/Album/song.flac becomes DST/Artist/Album/song.192k32.flac. An MP3 also
+# gets its lossless conversion beside it (song.flac), as flacscale does. Sources are
+# only read: nothing is copied into input/ and nothing in SRC is changed.
+#
+#   -j JOBS         files converted at once                      (default 4)
+#   -c CPULIST      pin the whole batch to these CPUs, e.g. 0-7  (default: no pinning)
+#   -s STAGE        convert and verify in this folder (a fast disk), then move each
+#                   finished file to DST one at a time. USE THIS when DST is a hard
+#                   disk: measured on a two-disk shingled array, 8 direct writers
+#                   reached 30.6 MiB/s; one sequential stream reached 186 MiB/s.
+#   -r RESERVE_GIB  stop starting files when DST has less free   (default 20)
+#   -n              dry run: count the work and stop
+#   after --        options for flacscale, e.g. -Q (restoration mode)
+#
+# Safe to interrupt and to run again: a file whose output was verified is skipped.
+# Restoration mode (-Q) keeps a source in memory (32 bytes per frame), so sources
+# longer than MAXQ_FRAMES run without it; the log of such a file says so.
+#
+# State lives in DST/_flacscale/: results.tsv (status, seconds, path), logs/, ok/,
+# deferred-no-space.txt, batch.log, done.flag.
+set -uo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+usage() { sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+[ $# -ge 2 ] || usage
+export SRC="${1%/}" DST="${2%/}"
+shift 2
+jobs=4 cpus="" dry=0
+export RESERVE_GIB=20 MAXQ_FRAMES=50000000 STAGE="" STAGE_MIN_GIB=6
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -j) jobs="$2"; shift 2 ;;
+    -c) cpus="$2"; shift 2 ;;
+    -s) STAGE="${2%/}"; shift 2 ;;
+    -r) RESERVE_GIB="$2"; shift 2 ;;
+    -n) dry=1; shift ;;
+    --) shift; break ;;
+    *) usage ;;
+    esac
+done
+export EXTRA="$*" FS="$root/out/flacscale" STATE="$DST/_flacscale"
+[ -d "$SRC" ] || { echo "upscale-tree: no such folder: $SRC" >&2; exit 1; }
+[ -x "$FS" ] || { echo "upscale-tree: $FS is missing; run make first" >&2; exit 1; }
+
+list="$(mktemp)"
+find "$SRC" -type f \( -iname '*.flac' -o -iname '*.mp3' \) -printf '%P\0' | sort -z > "$list"
+total=$(tr -cd '\0' < "$list" | wc -c)
+echo "upscale-tree: $total files under $SRC -> $DST; $jobs at once${cpus:+, CPUs $cpus}${STAGE:+, staged in $STAGE}; flacscale options: ${EXTRA:-none}"
+if [ "$dry" = 1 ]; then
+    exit 0
+fi
+mkdir -p "$STATE/logs" "$STATE/ok"
+[ -z "$STAGE" ] || mkdir -p "$STAGE"
+# A new run starts with a clean slate for what the previous one could not place.
+: > "$STATE/deferred-no-space.txt"
+[ -e "$STATE/done.flag" ] && mv -f "$STATE/done.flag" "$STATE/done.flag.previous"
+
+free_gib() { df --output=avail -BG "$1" | tail -1 | tr -dc 0-9; }
+export -f free_gib
+
+# One file. Runs in its own shell under xargs; everything it needs is exported.
+one() {
+    local rel="$1" src="$SRC/$1" name stem ext dir key log t0 rc opts frames work note="" good=0
+    name="$(basename "$rel")"; stem="${name%.*}"; ext="${name##*.}"; dir="$(dirname "$rel")"
+    key="$(printf '%s' "$rel" | sha1sum | cut -c1-16)"
+    log="$STATE/logs/$key.log"
+    if [ -e "$STATE/ok/$key" ] && [ -s "$DST/$dir/$stem.192k32.flac" ]; then
+        return 0
+    fi
+    if [ "$(free_gib "$DST")" -lt "$RESERVE_GIB" ]; then
+        printf '%s\n' "$rel" >> "$STATE/deferred-no-space.txt"
+        return 0
+    fi
+    mkdir -p "$DST/$dir"
+    work="$DST/$dir"
+    if [ -n "$STAGE" ]; then
+        # Finished files wait here for the mover; do not start more than the disk holds.
+        while [ "$(free_gib "$STAGE")" -lt "$STAGE_MIN_GIB" ]; do sleep 5; done
+        work="$STAGE/$key"
+        mkdir -p "$work"
+    fi
+    opts="$EXTRA"
+    if [ "${ext,,}" = flac ] && [[ " $opts " == *" -Q "* ]]; then
+        frames=$(metaflac --show-total-samples "$src" 2>/dev/null || echo 0)
+        if [ "${frames:-0}" -gt "$MAXQ_FRAMES" ]; then
+            opts="$(printf ' %s ' "$opts" | sed 's/ -Q / /')"
+            note="restoration mode left out: $frames frames would need too much memory"
+        fi
+    fi
+    t0=$(date +%s.%N)
+    {
+        echo "##### $rel"
+        [ -n "$note" ] && echo "note: $note"
+        # shellcheck disable=SC2086
+        "$FS" "$src" -o "$work/$stem.192k32.flac" $opts
+    } > "$log" 2>&1
+    rc=$?
+    if [ $rc = 0 ] && flac -t --silent "$work/$stem.192k32.flac" 2>/dev/null &&
+        { [ "${ext,,}" != mp3 ] || flac -t --silent "$work/$stem.flac" 2>/dev/null; }; then
+        good=1
+    fi
+    if [ $good = 1 ] && [ -n "$STAGE" ]; then
+        # One mover at a time: the destination sees a single sequential stream.
+        if flock "$STATE/mover.lock" mv -f "$work"/*.flac "$DST/$dir/" 2>> "$log"; then
+            rmdir "$work" 2>/dev/null
+        else
+            good=0
+        fi
+    fi
+    if [ $good = 1 ]; then
+        touch "$STATE/ok/$key"
+        printf 'ok\t%.1f\t%s\n' "$(echo "$(date +%s.%N) - $t0" | bc)" "$rel" >> "$STATE/results.tsv"
+    else
+        printf 'FAILED\t%.1f\t%s\n' "$(echo "$(date +%s.%N) - $t0" | bc)" "$rel" >> "$STATE/results.tsv"
+    fi
+}
+export -f one
+
+start=$(date +%s)
+echo "$(date '+%F %T') start: $total files" >> "$STATE/batch.log"
+if [ -n "$cpus" ]; then
+    taskset -c "$cpus" xargs -0 -P "$jobs" -n 1 bash -c 'one "$0"' < "$list"
+else
+    xargs -0 -P "$jobs" -n 1 bash -c 'one "$0"' < "$list"
+fi
+ok=$(find "$STATE/ok" -type f | wc -l)
+# A file that failed in an earlier run and passed later counts as passed.
+failed=$(awk -F'\t' '$1 == "FAILED" {f[$3] = 1} $1 == "ok" {delete f[$3]} END {print length(f)}' "$STATE/results.tsv" 2>/dev/null)
+deferred=$(sort -u "$STATE/deferred-no-space.txt" 2>/dev/null | wc -l)
+echo "$(date '+%F %T') end: $ok of $total verified, ${failed:-0} failed, $deferred deferred for space, $(( $(date +%s) - start )) s" | tee -a "$STATE/batch.log"
+touch "$STATE/done.flag"

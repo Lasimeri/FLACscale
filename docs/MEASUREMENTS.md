@@ -272,3 +272,10 @@ identical with and without the module linked in.
 
 **A real 24-bit source** (48 kHz, 298 s): samples moved 0.007 steps RMS. There
 is nothing below 24 bits to recover; the mode is for 16-bit material.
+
+**Repeatability.** The dequantizer plans its FFTs with `FFTW_ESTIMATE`. With the
+timing-based planner (`FFTW_MEASURE`) five runs of one file gave three different
+outputs when the machine was busy, one unit in the last of 32 bits apart
+(-242 dB): the planner picks a different algorithm under load, and algorithms
+round differently. With the deterministic planner, 10 of 10 runs are identical,
+8 of them under deliberate load, and the gains above are unchanged.

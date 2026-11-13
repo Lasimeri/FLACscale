@@ -58,6 +58,14 @@ One file, with a read-only checksummed copy of the input and a verified output:
     scripts/upscale "/path/to/song.flac"
     scripts/upscale "/path/to/song.flac" myfolder -Q     # options after the folder name go to flacscale
 
+A whole folder tree, keeping its structure (FLAC and MP3; resumable; every output verified):
+
+    scripts/upscale-tree /music/in /music/out -j 8 -s /fast/disk/stage -- -Q
+
+`-s` converts on a fast disk and hands finished files to the destination one at a
+time. Use it when the destination is a hard disk: on a two-disk shingled array, eight
+direct writers reached 30.6 MiB/s and the staged form 79.1 MiB/s.
+
 The result is `out/<song>/<song>.192k32.flac`, with the report in
 `out/<song>/run.log`. An MP3 input also gets `<song>.flac`, a plain 24-bit
 conversion at the source rate.
