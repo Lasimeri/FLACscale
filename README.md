@@ -56,6 +56,7 @@ slower than it. Its tables are explained in
 One file, with a read-only checksummed copy of the input and a verified output:
 
     scripts/upscale "/path/to/song.flac"
+    scripts/upscale "/path/to/song.flac" myfolder -Q     # options after the folder name go to flacscale
 
 The result is `out/<song>/<song>.192k32.flac`, with the report in
 `out/<song>/run.log`. An MP3 input also gets `<song>.flac`, a plain 24-bit
@@ -63,7 +64,7 @@ conversion at the source rate.
 
 The converter directly:
 
-    out/flacscale IN [-o OUT.flac] [-r RATE] [-g auto|DB] [-t THREADS] [-n] [-D] [-X]
+    out/flacscale IN [-o OUT.flac] [-r RATE] [-g auto|DB] [-t THREADS] [-n] [-D] [-X] [-Q]
 
 | Option | Effect | Default |
 |---|---|---|
@@ -74,6 +75,7 @@ The converter directly:
 | `-n` | lossy input: skip the extra 24-bit FLAC copy | off |
 | `-D` | skip the clipped-peak repair | off |
 | `-X` | skip the band extension (plain resample only) | off |
+| `-Q` | restoration mode: first back-calculate the precision that rounding to the source's bit depth removed (integer PCM sources only; see below) | off |
 
 ## What a run reports
 
@@ -95,6 +97,21 @@ Reading it: the MP3 encoder cut everything above 15250 Hz; the band from there
 to 25 kHz was synthesised by folding; above 25 kHz only harmonics were added;
 the level was left alone because the true peak fits. The audio itself is not
 distributed here.
+
+## Restoration mode (`-Q`)
+
+Off by default; without it the converter behaves exactly as before. With it,
+the 16-bit samples are treated as what they are: statements that the true
+value lay within half a step of each of them. A Wiener filter removes rounding
+noise where it stands alone, and every sample is then forced back inside its
+interval, so no sample ever moves more than half a step from the file.
+
+Measured against a 96 kHz / 32-bit master cut down to 44.1 kHz / 16 bit: the
+result is 0.42 dB closer to the truth as mastered, 2.82 dB closer in a passage
+60 dB down, and 0.22 dB closer after the whole upscale. It is a small, real
+gain that grows as the music gets quieter. A 24-bit source has nothing to
+recover (samples moved 0.007 steps RMS on a real one). Lossy and float sources
+are skipped.
 
 ## Signal path
 

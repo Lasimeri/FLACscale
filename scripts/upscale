@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # upscale -- run one audio file through FLACscale, the project way.
 #
-#   scripts/upscale FILE [OUTDIR-NAME]
+#   scripts/upscale FILE [OUTDIR-NAME [FLACSCALE-OPTIONS...]]
+#
+# Anything after OUTDIR-NAME goes to flacscale unchanged, e.g. -Q (restoration
+# mode) or -X (no band extension).
 #
 # 1. copies FILE into input/ read-only (skipped when it is already there) and
 #    checks its SHA-256 against the original
@@ -10,7 +13,7 @@
 # 3. verifies every FLAC written with `flac -t`
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-[ $# -ge 1 ] || { echo "usage: scripts/upscale FILE [OUTDIR-NAME]" >&2; exit 2; }
+[ $# -ge 1 ] || { echo "usage: scripts/upscale FILE [OUTDIR-NAME [FLACSCALE-OPTIONS...]]" >&2; exit 2; }
 src="$1"
 [ -f "$src" ] || { echo "upscale: no such file: $src" >&2; exit 1; }
 name="$(basename "$src")"
@@ -31,7 +34,7 @@ if [ "$(realpath "$src")" != "$(realpath -m "$dst")" ]; then
 fi
 
 mkdir -p "$dir"
-"$root/out/flacscale" "$dst" -o "$dir/$stem.192k32.flac" | tee "$dir/run.log"
+"$root/out/flacscale" "$dst" -o "$dir/$stem.192k32.flac" "${@:3}" | tee "$dir/run.log"
 for f in "$dir/$stem.192k32.flac" "$dir/$stem.flac"; do
     [ -f "$f" ] || continue
     if flac -t --silent "$f"; then

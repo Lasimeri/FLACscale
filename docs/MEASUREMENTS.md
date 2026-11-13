@@ -215,8 +215,8 @@ plain forms); resampler chain 55.7 ms per 10 s stereo (179.6x), libsoxr VHQ
 
 ## 10. Dequantization against a known truth (`out/dequantcheck FILE`)
 
-Not part of the converter yet: a gated module (`fu_dequant`) for a separate
-restoration mode. See [ROADMAP.md](ROADMAP.md).
+Switched on with `flacscale -Q` (off by default). The module is `fu_dequant`;
+this section is its gate.
 
 Method: take audio finer than 16 bits, round it to 16 bits, run the
 dequantizer on the rounded copy, and score both against the original over the
@@ -260,3 +260,15 @@ interval nearest zero (the largest move was 0.500 steps in every run), and an
 error of half a step everywhere is worse than the rounding error it replaces.
 Those tests ran on dense, loud electronic music; the published evaluations use
 sparser material.
+
+**End to end** (`flacscale -Q -X -D` against `flacscale -X -D`, both from the
+16-bit cut, scored with `flacdiff` at 192 kHz against the float truth sent
+through the same resampler): residual -85.44 / -85.53 dB without `-Q`, -85.66 /
+-85.75 dB with it (left / right). The gain after the upscale is 0.22 dB.
+
+**Default path unchanged by the mode's existence:** the audio MD5 of four
+converted files (synthetic tones, an MP3, a clipped FLAC, a clean FLAC) is
+identical with and without the module linked in.
+
+**A real 24-bit source** (48 kHz, 298 s): samples moved 0.007 steps RMS. There
+is nothing below 24 bits to recover; the mode is for 16-bit material.

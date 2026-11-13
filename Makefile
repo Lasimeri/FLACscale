@@ -19,8 +19,8 @@ $(BINS): | out
 out:
 	mkdir -p out
 
-out/flacscale: src/flacscale.c src/fu_pcm.c $(ENGINE) $(INPUT) $(HEADERS)
-	$(CC) $(CFLAGS) -o $@ src/flacscale.c src/fu_pcm.c $(ENGINE) $(INPUT) $(INLIBS) -lfftw3 -lm
+out/flacscale: src/flacscale.c src/fu_pcm.c src/fu_dequant.c $(ENGINE) $(INPUT) $(HEADERS)
+	$(CC) $(CFLAGS) -fopenmp -o $@ src/flacscale.c src/fu_pcm.c src/fu_dequant.c $(ENGINE) $(INPUT) $(INLIBS) -lfftw3 -lm
 
 out/flacspec: src/flacspec.c $(INPUT) $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ src/flacspec.c $(INPUT) $(INLIBS) -lfftw3 -lm

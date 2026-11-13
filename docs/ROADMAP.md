@@ -22,7 +22,7 @@ first section is built.
 2. **Graphical front end**, in Rust, on top of the player. It comes last.
 3. **Restoration mode**, separate from the default path, which stays
    bit-identical. Step one is gated: dequantisation (`fu_dequant`,
-   MEASUREMENTS section 10). Still to build: the switch in `flacscale`, an
+   MEASUREMENTS section 10) and switched on with `flacscale -Q`. Still to build: an
    estimate of whether a file was dithered, and recovery of dynamics flattened
    by a mastering limiter. The last one is an estimate by nature: exact
    inversion of a limiter needs its settings (Gorlow and Reiss, IEEE TASLP
@@ -43,8 +43,8 @@ first section is built.
 5. **Detector thresholds are fixed constants.** 32 samples at the extreme for
    "clipped", a 20 dB drop for a bandwidth wall. Lightly clipped masters and
    gentle roll-offs fall under them.
-6. **Dequantisation is built but not wired in.** `fu_dequant` passes its gate
-   (+0.42 dB as mastered, +2.82 dB at 60 dB down); the converter does not call
-   it yet, so the 16-bit rounding of the source is still carried into the
-   output unchanged.
+6. **Dequantisation assumes plain rounding.** `flacscale -Q` passes its gate
+   (+0.42 dB as mastered, +2.82 dB at 60 dB down), but it cannot yet tell whether
+   a master was dithered, so it keeps the conservative half-step interval and
+   leaves part of the possible gain on the table.
 7. **Tested on one machine and one distribution.**

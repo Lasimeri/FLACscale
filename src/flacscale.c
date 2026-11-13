@@ -13,10 +13,15 @@
  *                      rate (skipped with a fixed -g DB)
  *           2  write   run it again with the smallest uniform attenuation that
  *                      avoids clipping (none when the peak fits) and encode
- * Usage   : flacscale IN [-o OUT.flac] [-r RATE] [-g auto|DB] [-t THREADS] [-n] [-D] [-X]
+ * Restore : -Q is a separate mode, off by default. The source is decoded into
+ *           memory, the precision that rounding to its bit depth removed is
+ *           back-calculated (fu_dequant), and passes 1 and 2 read that buffer
+ *           instead of the decoder. Without -Q nothing of this runs.
+ * Usage   : flacscale IN [-o OUT.flac] [-r RATE] [-g auto|DB] [-t THREADS] [-n] [-D] [-X] [-Q]
  */
 #include "fu_cliplevel.h"
 #include "fu_cutoff.h"
+#include "fu_dequant.h"
 #include "fu_engine.h"
 #include "fu_flac.h"
 #include "fu_input.h"
@@ -34,9 +39,19 @@ enum { OUT_BITS = 32, COPY_BITS = 24 };
 typedef struct options {
     const char *in, *out;
     uint32_t    rate, threads;
-    int         gain_auto, no_copy, no_declip, no_extend;
+    int         gain_auto, no_copy, no_declip, no_extend, restore;
     double      gain_db;
 } options;
+
+/* The whole source in memory, dequantized: only the restoration mode fills it. */
+typedef struct memsrc {
+    double *ch[FU_MAX_CH];
+    size_t  frames;
+    double  moved_rms, moved_max;   /* how far samples moved, in quantization steps */
+    double  seconds;
+} memsrc;
+
+enum { MEM_BLOCK = 4096 };          /* frames handed to the engine per call from memory */
 
 typedef struct pass_stats {
     uint64_t frames_in, frames_out, clipped_out, clipped_src;
@@ -73,7 +88,7 @@ static double db(double ratio)
 
 static void usage(FILE *f)
 {
-    fputs("usage: flacscale IN [-o OUT.flac] [-r RATE] [-g auto|DB] [-t THREADS] [-n] [-D] [-X]\n"
+    fputs("usage: flacscale IN [-o OUT.flac] [-r RATE] [-g auto|DB] [-t THREADS] [-n] [-D] [-X] [-Q]\n"
           "  IN            a FLAC, WAV, AIFF or MP3 file (recognised by content)\n"
           "  -o OUT.flac   output file            (default: IN's name + .RATEk32.flac, here)\n"
           "  -r RATE       output sample rate, Hz (default: 192000)\n"
@@ -82,7 +97,9 @@ static void usage(FILE *f)
           "  -t THREADS    FLAC encoder threads   (default: 4)\n"
           "  -n            lossy input: do not also write the plain 24-bit FLAC conversion\n"
           "  -D            do not repair clipped peaks\n"
-          "  -X            do not extend the band above the source's real bandwidth\n",
+          "  -X            do not extend the band above the source's real bandwidth\n"
+          "  -Q            restoration mode: first back-calculate the precision that rounding\n"
+          "                to the source's bit depth removed (integer PCM sources only)\n",
           f);
 }
 
@@ -101,6 +118,8 @@ static int parse(int argc, char **argv, options *o)
             o->no_extend = 1;
         } else if (!strcmp(a, "-D")) {
             o->no_declip = 1;
+        } else if (!strcmp(a, "-Q")) {
+            o->restore = 1;
         } else if (a[0] == '-' && a[1] && strchr("orgt", a[1]) && !a[2]) {
             if (++i >= argc) {
                 fprintf(stderr, "flacscale: %s needs a value\n", a);
@@ -239,17 +258,94 @@ static int emit(const double *const *sig, int32_t *const *pcm, uint32_t nch, siz
     return rc;
 }
 
-/* Passes 1 and 2: one trip through the signal path. */
-static int run_pass(const options *o, const fu_engine_cfg *cfg, const sinks *k, pass_stats *st)
+static void memsrc_free(memsrc *m)
+{
+    for (int ch = 0; ch < FU_MAX_CH; ch++)
+        free(m->ch[ch]);
+}
+
+/* Restoration mode: decode the whole source and dequantize every channel.
+ * A sample that sits on a clipping ceiling (hi / lo from pass 0) keeps its file
+ * value: its true value lies beyond the ceiling, not inside a rounding
+ * interval, and the repair stage must still recognise it exactly. */
+static int load_restored(const options *o, const fu_format *src, const double *hi,
+                         const double *lo, memsrc *m)
 {
     char err[512];
-    fu_format src;
+    fu_format got;
+    const double t0 = now_s();
+    fu_input *in = fu_input_open(o->in, &got, err, sizeof err);
+    if (!in) {
+        fprintf(stderr, "flacscale: %s\n", err);
+        return -1;
+    }
+    size_t cap = 0;
+    long   n;
+    const double *planes[FU_MAX_CH];
+    while ((n = fu_input_read(in, planes)) > 0) {
+        if (m->frames + (size_t)n > cap) {
+            cap = 2 * (m->frames + (size_t)n) + (size_t)src->frames;
+            for (uint32_t ch = 0; ch < src->channels; ch++) {
+                double *p = realloc(m->ch[ch], cap * sizeof *p);
+                if (!p) {
+                    n = -1;
+                    break;
+                }
+                m->ch[ch] = p;
+            }
+            if (n < 0)
+                break;
+        }
+        for (uint32_t ch = 0; ch < src->channels; ch++)
+            memcpy(m->ch[ch] + m->frames, planes[ch], (size_t)n * sizeof(double));
+        m->frames += (size_t)n;
+    }
+    fu_input_close(in);
+    double *file = n == 0 ? malloc((m->frames + 1) * sizeof *file) : NULL;
+    if (!file) {
+        fprintf(stderr, "flacscale: %s: cannot load the source for the restoration mode\n", o->in);
+        return -1;
+    }
+    const double step = ldexp(1.0, 1 - (int)src->bps);
+    const fu_dequant_cfg cfg = fu_dequant_cfg_default();
+    double sum = 0.0;
+    int    rc = 0;
+    for (uint32_t ch = 0; ch < src->channels && !rc; ch++) {
+        double *x = m->ch[ch];
+        memcpy(file, x, m->frames * sizeof *file);
+        rc = fu_dequant(x, m->frames, step, &cfg);
+        for (size_t i = 0; i < m->frames; i++) {
+            if (file[i] >= hi[ch] || file[i] <= lo[ch])
+                x[i] = file[i];
+            const double moved = (x[i] - file[i]) / step;
+            sum += moved * moved;
+            m->moved_max = fmax(m->moved_max, fabs(moved));
+        }
+    }
+    free(file);
+    if (rc) {
+        fprintf(stderr, "flacscale: out of memory in the restoration mode\n");
+        return -1;
+    }
+    m->moved_rms = sqrt(sum / ((double)m->frames * src->channels + 1e-300));
+    m->seconds = now_s() - t0;
+    return 0;
+}
+
+/* Passes 1 and 2: one trip through the signal path. The source is the decoder,
+ * or `mem` when the restoration mode has prepared it. */
+static int run_pass(const options *o, const fu_format *fmt, const memsrc *mem,
+                    const fu_engine_cfg *cfg, const sinks *k, pass_stats *st)
+{
+    char err[512];
+    fu_format src = *fmt;
     work w = { 0 };
     int rc = -1;
+    size_t at = 0;
 
     memset(st, 0, sizeof *st);
-    fu_input *in = fu_input_open(o->in, &src, err, sizeof err);
-    if (!in) {
+    fu_input *in = mem ? NULL : fu_input_open(o->in, &src, err, sizeof err);
+    if (!mem && !in) {
         fprintf(stderr, "flacscale: %s\n", err);
         return -1;
     }
@@ -263,7 +359,15 @@ static int run_pass(const options *o, const fu_engine_cfg *cfg, const sinks *k, 
     for (;;) {
         const double *planes[FU_MAX_CH];
         double t = now_s();
-        const long n = fu_input_read(in, planes);
+        long n;
+        if (mem) {
+            n = (long)(mem->frames - at < MEM_BLOCK ? mem->frames - at : MEM_BLOCK);
+            for (uint32_t ch = 0; ch < src.channels; ch++)
+                planes[ch] = mem->ch[ch] + at;
+            at += (size_t)n;
+        } else {
+            n = fu_input_read(in, planes);
+        }
         st->s_decode += now_s() - t;
         if (n < 0) {
             fprintf(stderr, "flacscale: %s: decode error after %llu frames; the file is damaged\n",
@@ -372,12 +476,23 @@ int main(int argc, char **argv)
         cfg.ref_top = (wall > 0.0 ? wall : 0.907 * 0.5 * src.rate) - 250.0;
     }
 
+    /* Restoration mode: integer PCM only. A lossy or float source has no
+     * rounding grid to back-calculate from. */
+    memsrc mem = { 0 };
+    const int restore = o.restore && !lossy && src.bps >= 8 && src.bps <= 24;
+    if (restore && load_restored(&o, &src, cfg.hi, cfg.lo, &mem)) {
+        fu_input_close(probe);
+        memsrc_free(&mem);
+        return 1;
+    }
+    const memsrc *from = restore ? &mem : NULL;
+
     /* Pass 1. */
     pass_stats a = { 0 }, b;
     sinks k = { .gain_out = pow(10.0, o.gain_db / 20.0), .gain_copy = 1.0 };
     if (o.gain_auto) {
         const sinks measure = { .gain_out = 1.0, .gain_copy = 1.0 };
-        if (run_pass(&o, &cfg, &measure, &a)) {
+        if (run_pass(&o, &src, from, &cfg, &measure, &a)) {
             fu_input_close(probe);
             return 1;
         }
@@ -393,8 +508,8 @@ int main(int argc, char **argv)
         .frames = (src.frames * o.rate + src.rate - 1) / src.rate,
     };
     const char *const extra[] = { tag };
-    snprintf(tag, sizeof tag, "FLACSCALE=%s %u Hz %s -> %u Hz %d bit, gain %+.4f dB", kind, src.rate,
-             depth, dst.rate, OUT_BITS, db(k.gain_out));
+    snprintf(tag, sizeof tag, "FLACSCALE=%s %u Hz %s -> %u Hz %d bit, gain %+.4f dB%s", kind,
+             src.rate, depth, dst.rate, OUT_BITS, db(k.gain_out), restore ? ", dequantized" : "");
     k.out = fu_flac_create(o.out, &dst, fu_input_tags(probe), extra, 1, o.threads, err, sizeof err);
     if (k.out && want_copy) {
         const fu_format cfmt = { .rate = src.rate, .channels = src.channels, .bps = COPY_BITS,
@@ -409,10 +524,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "flacscale: %s\n", err);
         return 1;
     }
-    int rc = run_pass(&o, &cfg, &k, &b);
+    int rc = run_pass(&o, &src, from, &cfg, &k, &b);
     rc |= fu_flac_finish(k.out);
     if (k.copy)
         rc |= fu_flac_finish(k.copy);
+    memsrc_free(&mem);
     if (rc) {
         fprintf(stderr, "flacscale: %s: output is incomplete\n", o.out);
         return 1;
@@ -440,6 +556,13 @@ int main(int argc, char **argv)
                (unsigned long long)b.declip.pinned, (unsigned long long)b.declip.clusters,
                (unsigned long long)b.declip.raised, (unsigned long long)b.declip.held,
                (unsigned long long)b.declip.refused, db(b.declip.peak));
+    if (restore)
+        printf("  restore    back-calculated below %u bits (Wiener filter + projection into the "
+               "rounding intervals): samples moved %.3f steps RMS, %.3f at most; %.2f s\n",
+               src.bps, mem.moved_rms, mem.moved_max, mem.seconds);
+    else if (o.restore)
+        printf("  restore    skipped: a %s source has no rounding grid to back-calculate from\n",
+               depth);
     if (wall > 0.0)
         printf("  bandwidth  the source's content ends at %.0f Hz (a %.1f dB wall)\n", wall, wall_drop);
     else
