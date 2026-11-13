@@ -214,8 +214,13 @@ fu_flac_out *fu_flac_create(const char *path, const fu_format *fmt, const fu_tag
     FLAC__stream_encoder_set_compression_level(e, 5);
     FLAC__stream_encoder_set_total_samples_estimate(e, fmt->frames);
     FLAC__stream_encoder_set_metadata(e, out->tags.block, (uint32_t)out->tags.n);
-    if (threads > 1)
-        FLAC__stream_encoder_set_num_threads(e, threads);
+    /* libFLAC refuses a count above its own maximum and then encodes on ONE
+     * thread (measured with libFLAC 1.5.0: 6.53 s at 96 and at 128 threads, the
+     * single-thread time, against 0.63 s at 64). Step down to the largest count
+     * it accepts. */
+    for (uint32_t t = threads; t > 1; t--)
+        if (FLAC__stream_encoder_set_num_threads(e, t) == FLAC__STREAM_ENCODER_SET_NUM_THREADS_OK)
+            break;
 
     const FLAC__StreamEncoderInitStatus st = FLAC__stream_encoder_init_file(e, path, NULL, NULL);
     if (st != FLAC__STREAM_ENCODER_INIT_STATUS_OK) {

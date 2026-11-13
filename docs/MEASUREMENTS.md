@@ -174,3 +174,41 @@ example in the README.
 - Speed of the whole path (scan, measure, write): 23x to 33x real time.
 - Heavily clipped masters lose the most level, because restored peaks need
   headroom: the -6.2882 dB file had a highest repaired peak of +6.287 dBFS.
+
+## 9. A second machine: AMD EPYC 7742 (64 cores, 128 threads)
+
+Built from a fresh clone of this repository, same compiler and library
+versions, Linux 7.3.3. One FLAC file, 588.516 s, 44.1 kHz / 16 bit, default
+path. The machine was also running an idle inference server.
+
+**Same bits.** The output's audio MD5 equals the one produced on the Ryzen
+5800X, for this file and for the `make check` tones.
+
+**One conversion.** The signal path is single-threaded; `-t` sets the FLAC
+encoder's threads only.
+
+| `-t` | Total s | x real time | Encode s |
+|---|---|---|---|
+| 1 | 26.76 | 22.0 | 6.54 |
+| 4 (default) | 20.60 | 28.6 | 0.36 |
+| 16 | 20.97 | 28.1 | 0.69 |
+| 64 | 20.85 | 28.2 | 0.63 |
+
+For comparison, the 5800X converts the same file in 19.69 s (29.9x). libFLAC
+1.5.0 refused 96 and 128 threads and encoded on one (6.53 s); `flacscale` now
+steps down to the largest count the library accepts.
+
+**Many conversions at once** (`-t 1` each, output discarded):
+
+| Simultaneous | Wall s | Each instance s | Audio converted | Throughput |
+|---|---|---|---|---|
+| 1 | 26.76 | 26.76 | 588.5 s | 22.0x real time |
+| 64 | 38.37 | 36.12 to 38.34 | 37,665 s | 981.7x real time |
+| 128 | 68.83 | 67.32 to 68.80 | 75,330 s | 1094.4x real time |
+
+Filling the second hardware thread of every core adds 11.5 % throughput. Each
+instance slows from 26.76 s alone to about 37 s with all 64 cores busy.
+
+Gates on that machine: `pcmcheck` PASS (conversion 10.0x, peak 7.0x over the
+plain forms); resampler chain 55.7 ms per 10 s stereo (179.6x), libsoxr VHQ
+34.0 ms (1.64x faster there).
